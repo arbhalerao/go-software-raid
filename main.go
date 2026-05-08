@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	level := flag.Int("level", 5, "RAID level (0, 1, or 5)")
+	level := flag.Int("level", 5, "RAID level (0, 1, 5, or 6)")
 	blockSize := flag.Int("block-size", 4096, "Block size in bytes")
 	blocksPerDisk := flag.Int("blocks", 100, "Blocks per disk")
 	flag.Parse()
@@ -32,6 +32,10 @@ func main() {
 		numDisks = 4
 		fmt.Printf("RAID 5: Striping + distributed parity across %d disks — 1 disk fault tolerance\n", numDisks)
 		fmt.Printf("Capacity: %d blocks\n\n", (numDisks-1)**blocksPerDisk)
+	case RAID6:
+		numDisks = 4
+		fmt.Printf("RAID 6: Striping + dual distributed parity across %d disks — 2 disk fault tolerance\n", numDisks)
+		fmt.Printf("Capacity: %d blocks\n\n", (numDisks-2)**blocksPerDisk)
 	default:
 		fmt.Printf("Unsupported RAID level: %d\n", raidLevel)
 		os.Exit(1)

@@ -11,6 +11,7 @@ const (
 	RAID0 RAIDLevel = 0 // striping
 	RAID1 RAIDLevel = 1 // mirroring
 	RAID5 RAIDLevel = 5 // striping + distributed parity
+	RAID6 RAIDLevel = 6 // striping + dual distributed parity
 )
 
 type RAIDArray struct {
@@ -24,6 +25,7 @@ type RAIDArray struct {
 	raid0 *raid0Impl
 	raid1 *raid1Impl
 	raid5 *raid5Impl
+	raid6 *raid6Impl
 }
 
 type RAIDConfig struct {
@@ -40,6 +42,10 @@ func NewRAIDArray(config RAIDConfig) (*RAIDArray, error) {
 
 	if config.Level == RAID5 && len(config.DiskPaths) < 3 {
 		return nil, fmt.Errorf("RAID 5 requires at least 3 disks")
+	}
+
+	if config.Level == RAID6 && len(config.DiskPaths) < 4 {
+		return nil, fmt.Errorf("RAID 6 requires at least 4 disks")
 	}
 
 	if config.BlockSize <= 0 {
@@ -79,6 +85,9 @@ func NewRAIDArray(config RAIDConfig) (*RAIDArray, error) {
 	case RAID5:
 		r.capacity = config.BlocksPerDisk * (len(disks) - 1)
 		r.raid5 = newRAID5(r)
+	case RAID6:
+		r.capacity = config.BlocksPerDisk * (len(disks) - 2)
+		r.raid6 = newRAID6(r)
 	default:
 		r.Close()
 		return nil, fmt.Errorf("unsupported RAID level: %d", config.Level)
@@ -111,6 +120,8 @@ func (r *RAIDArray) WriteBlock(logicalBlockID int, data []byte) error {
 		return r.raid1.writeBlock(logicalBlockID, data)
 	case RAID5:
 		return r.raid5.writeBlock(logicalBlockID, data)
+	case RAID6:
+		return r.raid6.writeBlock(logicalBlockID, data)
 	default:
 		return fmt.Errorf("unsupported RAID level: %d", r.level)
 	}
@@ -128,16 +139,22 @@ func (r *RAIDArray) ReadBlock(logicalBlockID int) ([]byte, error) {
 		return r.raid1.readBlock(logicalBlockID)
 	case RAID5:
 		return r.raid5.readBlock(logicalBlockID)
+	case RAID6:
+		return r.raid6.readBlock(logicalBlockID)
 	default:
 		return nil, fmt.Errorf("unsupported RAID level: %d", r.level)
 	}
 }
 
-func (r *RAIDArray) RebuildDisk(diskIndex int) error { // rebuilds a failed disk (RAID 5 only)
-	if r.level != RAID5 {
-		return fmt.Errorf("disk rebuild only supported for RAID 5")
+func (r *RAIDArray) RebuildDisk(diskIndex int) error {
+	switch r.level {
+	case RAID5:
+		return r.raid5.rebuildDisk(diskIndex)
+	case RAID6:
+		return r.raid6.rebuildDisk(diskIndex)
+	default:
+		return fmt.Errorf("disk rebuild not supported for RAID %d", r.level)
 	}
-	return r.raid5.rebuildDisk(diskIndex)
 }
 
 func (r *RAIDArray) GetStats() []DiskStats {

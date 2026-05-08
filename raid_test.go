@@ -343,6 +343,258 @@ func TestXORProperties(t *testing.T) {
 	}
 }
 
+func TestRAID6ParityCalculation(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	cfg := RAIDConfig{
+		Level:         RAID6,
+		DiskPaths:     []string{"disks/test_raid6_disk0.img", "disks/test_raid6_disk1.img", "disks/test_raid6_disk2.img", "disks/test_raid6_disk3.img"},
+		BlockSize:     4096,
+		BlocksPerDisk: 20,
+	}
+
+	r, err := NewRAIDArray(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create RAID 6 array: %v", err)
+	}
+	defer r.Close()
+
+	blks := []string{
+		"RAID 6 block 0",
+		"RAID 6 block 1",
+		"RAID 6 block 2",
+		"RAID 6 block 3",
+	}
+
+	for i, c := range blks {
+		d := makeBlock(cfg.BlockSize, c)
+		if err := r.WriteBlock(i, d); err != nil {
+			t.Fatalf("Failed to write block %d: %v", i, err)
+		}
+	}
+
+	for i, c := range blks {
+		d, err := r.ReadBlock(i)
+		if err != nil {
+			t.Errorf("Failed to read block %d: %v", i, err)
+		}
+		if !bytes.Equal(makeBlock(cfg.BlockSize, c), d) {
+			t.Errorf("Data mismatch for block %d", i)
+		}
+	}
+}
+
+func TestRAID6DegradedModeSingleDisk(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	cfg := RAIDConfig{
+		Level:         RAID6,
+		DiskPaths:     []string{"disks/test_raid6_deg1_disk0.img", "disks/test_raid6_deg1_disk1.img", "disks/test_raid6_deg1_disk2.img", "disks/test_raid6_deg1_disk3.img"},
+		BlockSize:     4096,
+		BlocksPerDisk: 20,
+	}
+
+	r, err := NewRAIDArray(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create RAID 6 array: %v", err)
+	}
+	defer r.Close()
+
+	blks := make([][]byte, 6)
+	for i := range blks {
+		blks[i] = makeBlock(cfg.BlockSize, fmt.Sprintf("Degraded1 block %d", i))
+		if err := r.WriteBlock(i, blks[i]); err != nil {
+			t.Fatalf("Failed to write block %d: %v", i, err)
+		}
+	}
+
+	r.disks[2].SetFailed(true)
+
+	for i, expected := range blks {
+		got, err := r.ReadBlock(i)
+		if err != nil {
+			t.Errorf("Block %d: read failed in degraded mode: %v", i, err)
+			continue
+		}
+		if !bytes.Equal(expected, got) {
+			t.Errorf("Block %d: data mismatch in degraded mode", i)
+		}
+	}
+}
+
+func TestRAID6DegradedModeQReconstruction(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	cfg := RAIDConfig{
+		Level:         RAID6,
+		DiskPaths:     []string{"disks/test_raid6_degq_disk0.img", "disks/test_raid6_degq_disk1.img", "disks/test_raid6_degq_disk2.img", "disks/test_raid6_degq_disk3.img"},
+		BlockSize:     4096,
+		BlocksPerDisk: 20,
+	}
+
+	r, err := NewRAIDArray(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create RAID 6 array: %v", err)
+	}
+	defer r.Close()
+
+	b0 := makeBlock(cfg.BlockSize, "Q-reconstruction block 0")
+	b1 := makeBlock(cfg.BlockSize, "Q-reconstruction block 1")
+	if err := r.WriteBlock(0, b0); err != nil {
+		t.Fatalf("Failed to write block 0: %v", err)
+	}
+	if err := r.WriteBlock(1, b1); err != nil {
+		t.Fatalf("Failed to write block 1: %v", err)
+	}
+
+	r.disks[0].SetFailed(true)
+	r.disks[2].SetFailed(true)
+
+	got0, err := r.ReadBlock(0)
+	if err != nil {
+		t.Fatalf("Failed to read block 0 with P+data disk failed: %v", err)
+	}
+	if !bytes.Equal(b0, got0) {
+		t.Error("Block 0: data mismatch after Q-based reconstruction")
+	}
+
+	got1, err := r.ReadBlock(1)
+	if err != nil {
+		t.Fatalf("Failed to read block 1: %v", err)
+	}
+	if !bytes.Equal(b1, got1) {
+		t.Error("Block 1: data mismatch")
+	}
+}
+
+func TestRAID6TwoDataDiskFailure(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	cfg := RAIDConfig{
+		Level:         RAID6,
+		DiskPaths:     []string{"disks/test_raid6_two_disk0.img", "disks/test_raid6_two_disk1.img", "disks/test_raid6_two_disk2.img", "disks/test_raid6_two_disk3.img"},
+		BlockSize:     4096,
+		BlocksPerDisk: 20,
+	}
+
+	r, err := NewRAIDArray(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create RAID 6 array: %v", err)
+	}
+	defer r.Close()
+
+	b0 := makeBlock(cfg.BlockSize, "Two-disk-failure block 0")
+	b1 := makeBlock(cfg.BlockSize, "Two-disk-failure block 1")
+	if err := r.WriteBlock(0, b0); err != nil {
+		t.Fatalf("Failed to write block 0: %v", err)
+	}
+	if err := r.WriteBlock(1, b1); err != nil {
+		t.Fatalf("Failed to write block 1: %v", err)
+	}
+
+	r.disks[2].SetFailed(true)
+	r.disks[3].SetFailed(true)
+
+	got0, err := r.ReadBlock(0)
+	if err != nil {
+		t.Fatalf("Failed to read block 0 with two data disks failed: %v", err)
+	}
+	if !bytes.Equal(b0, got0) {
+		t.Error("Block 0: data mismatch after two-disk reconstruction")
+	}
+
+	got1, err := r.ReadBlock(1)
+	if err != nil {
+		t.Fatalf("Failed to read block 1 with two data disks failed: %v", err)
+	}
+	if !bytes.Equal(b1, got1) {
+		t.Error("Block 1: data mismatch after two-disk reconstruction")
+	}
+}
+
+func TestRAID6Rebuild(t *testing.T) {
+	cleanup := setupTestEnv(t)
+	defer cleanup()
+
+	cfg := RAIDConfig{
+		Level:         RAID6,
+		DiskPaths:     []string{"disks/test_raid6_reb_disk0.img", "disks/test_raid6_reb_disk1.img", "disks/test_raid6_reb_disk2.img", "disks/test_raid6_reb_disk3.img"},
+		BlockSize:     4096,
+		BlocksPerDisk: 20,
+	}
+
+	r, err := NewRAIDArray(cfg)
+	if err != nil {
+		t.Fatalf("Failed to create RAID 6 array: %v", err)
+	}
+	defer r.Close()
+
+	blks := make([][]byte, 8)
+	for i := range blks {
+		blks[i] = makeBlock(cfg.BlockSize, fmt.Sprintf("RAID6 rebuild block %d", i))
+		if err := r.WriteBlock(i, blks[i]); err != nil {
+			t.Fatalf("Failed to write block %d: %v", i, err)
+		}
+	}
+
+	failedDisk := 2
+	r.disks[failedDisk].SetFailed(true)
+
+	if err := r.RebuildDisk(failedDisk); err != nil {
+		t.Fatalf("Rebuild failed: %v", err)
+	}
+
+	for i, expected := range blks {
+		got, err := r.ReadBlock(i)
+		if err != nil {
+			t.Errorf("Block %d: read failed after rebuild: %v", i, err)
+			continue
+		}
+		if !bytes.Equal(expected, got) {
+			t.Errorf("Block %d: data mismatch after rebuild", i)
+		}
+	}
+}
+
+func TestGF8Arithmetic(t *testing.T) {
+	for x := 0; x < 256; x++ {
+		if got := gfMul(1, byte(x)); got != byte(x) {
+			t.Errorf("gfMul(1, %d) = %d, want %d", x, got, x)
+		}
+	}
+
+	for a := 0; a < 256; a++ {
+		if got := gfMul(byte(a), 0); got != 0 {
+			t.Errorf("gfMul(%d, 0) = %d, want 0", a, got)
+		}
+	}
+
+	for a := 1; a < 256; a++ {
+		if got := gfMul(byte(a), gfInv(byte(a))); got != 1 {
+			t.Errorf("gfMul(%d, gfInv(%d)) = %d, want 1", a, a, got)
+		}
+	}
+
+	if got := gfPow(2, 0); got != 1 {
+		t.Errorf("gfPow(2, 0) = %d, want 1", got)
+	}
+
+	if got := gfPow(2, 255); got != 1 {
+		t.Errorf("gfPow(2, 255) = %d, want 1", got)
+	}
+
+	a, b, c := byte(0x53), byte(0xCA), byte(0x7F)
+	lhs := gfMul(a, b^c)
+	rhs := gfMul(a, b) ^ gfMul(a, c)
+	if lhs != rhs {
+		t.Errorf("GF distributivity failed: gfMul(%#x, %#x^%#x)=%#x, want %#x", a, b, c, lhs, rhs)
+	}
+}
+
 func setupTestEnv(t *testing.T) func() {
 	if err := os.MkdirAll("disks", 0755); err != nil {
 		t.Fatalf("Failed to create disk directory: %v", err)
